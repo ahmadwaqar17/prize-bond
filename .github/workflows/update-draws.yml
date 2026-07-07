@@ -1,6 +1,8 @@
 name: Update prize bond data files
 
 on:
+  push:
+    branches: [main]
   schedule:
     # Run every Monday at 6:00 UTC — new draws are typically published
     # on government working days.
