@@ -66,9 +66,7 @@ REQUEST_HEADERS = {
     )
 }
 
-def _get_proxies():
-    proxy = st.session_state.get("proxy_url", "").strip()
-    return {"http": proxy, "https": proxy} if proxy else None
+
 
 # A real prize-tier header line always contains the word "prize" AND a
 # comma-formatted rupee amount (e.g. "1,500,000" or "9,300"). This lets us
@@ -144,7 +142,7 @@ def get_draw_links(listing_page_url: str):
     a result file (.txt/.pdf/.doc), returning a list of (label, url) tuples,
     most recent first (the site already lists them newest-year-first).
     """
-    resp = requests.get(listing_page_url, headers=REQUEST_HEADERS, proxies=_get_proxies(), timeout=20)
+    resp = requests.get(listing_page_url, headers=REQUEST_HEADERS, timeout=20)
     resp.raise_for_status()
     html = resp.text
 
@@ -167,7 +165,7 @@ def fetch_and_parse_draw(file_url: str):
     Download a single draw's result file and parse it into a list of
     (prize_label, number_as_int, number_as_string) tuples.
     """
-    resp = requests.get(file_url, headers=REQUEST_HEADERS, proxies=_get_proxies(), timeout=30)
+    resp = requests.get(file_url, headers=REQUEST_HEADERS, timeout=30)
     resp.raise_for_status()
 
     if file_url.lower().endswith(".pdf"):
@@ -282,14 +280,6 @@ if draw_links:
         chosen_url = draw_links[choice_idx][1]
         chosen_draw_label = draw_links[choice_idx][0]
         st.caption(f"Source file: {chosen_url}")
-
-with st.expander("⚙️ Proxy settings (only if the site is blocked in your region)"):
-    st.text_input(
-        "HTTP/HTTPS proxy URL",
-        key="proxy_url",
-        placeholder="e.g. http://123.45.67.89:8080",
-        label_visibility="collapsed",
-    )
 
 st.markdown("**...or paste a direct result file URL instead:**")
 manual_url = st.text_input("Direct .txt or .pdf URL (optional — overrides the dropdown above)")
