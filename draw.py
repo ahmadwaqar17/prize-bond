@@ -33,6 +33,7 @@ may need small updates.
 
 import io
 import re
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -99,6 +100,18 @@ KNOWN_DENOMINATIONS = {"100", "200", "750", "1500", "7500", "15000", "25000", "4
 
 # Date embedded in a label like "15-04-2026" or "15/04/2026"
 DATE_PATTERN = re.compile(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})")
+
+# Local data directory — populated by the GitHub Action (scripts/update_data.py)
+DATA_DIR = Path(__file__).resolve().parent / "data"
+
+DENOM_SLUG = {
+    "Rs. 100": "rs-100",
+    "Rs. 200": "rs-200",
+    "Rs. 750": "rs-750",
+    "Rs. 1500": "rs-1500",
+    "Rs. 25,000 (Premium)": "rs-25000-premium",
+    "Rs. 40,000 (Premium)": "rs-40000-premium",
+}
 
 
 def prettify_draw_label(label: str, url: str) -> str:
@@ -226,6 +239,41 @@ def check_number(parsed_numbers, bond_number_str: str):
 
 
 # ---------------------------------------------------------------------------
+# Local data helpers (bundled result files from GitHub Action)
+# ---------------------------------------------------------------------------
+
+def get_local_draws(denom_slug: str):
+    """Return list of (pretty_label, filepath) for locally cached draw files."""
+    denom_dir = DATA_DIR / denom_slug
+    if not denom_dir.is_dir():
+        return []
+    files = sorted(denom_dir.iterdir(), reverse=True)
+    result = []
+    for fp in files:
+        if fp.suffix.lower() not in (".txt", ".pdf", ".doc", ".docx"):
+            continue
+        label = prettify_draw_label(fp.name, fp.name)
+        result.append((label, str(fp)))
+    return result
+
+
+def parse_local_file(filepath: str):
+    """Read and parse a local result file."""
+    if filepath.lower().endswith(".pdf"):
+        if pdfplumber is None:
+            raise RuntimeError("pdfplumber is not installed (pip install pdfplumber)")
+        text_parts = []
+        with pdfplumber.open(filepath) as pdf:
+            for page in pdf.pages:
+                text_parts.append(page.extract_text() or "")
+        text = "\n".join(text_parts)
+    else:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    return parse_draw_text(text)
+
+
+# ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
@@ -233,34 +281,27 @@ st.set_page_config(page_title="Pakistan Prize Bond Checker", page_icon="🎟️"
 
 st.title("🎟️ Pakistan Prize Bond Checker")
 st.caption(
-    "Live results fetched directly from the official National Savings "
-    "website (savings.gov.pk). Nothing is stored — every check happens "
-    "in real time. (Not affiliated with any third-party mirror site.)"
+    "Results sourced from the official National Savings website "
+    "(savings.gov.pk). Data files are bundled with the app and "
+    "automatically kept up to date."
 )
 
 # --- Step 1: Denomination ---
 denom_label = st.selectbox("1️⃣ Select your bond denomination", list(DENOMINATION_PAGES.keys()))
 listing_url = DENOMINATION_PAGES[denom_label]
+slug = DENOM_SLUG[denom_label]
 
 # --- Step 2: Draw date ---
-with st.spinner("Fetching available draw dates from savings.gov.pk..."):
-    try:
-        draw_links = get_draw_links(listing_url)
-    except Exception as e:
-        draw_links = []
-        st.error(
-            f"Couldn't reach the official listing page ({e}). "
-            "The site may be temporarily down, or its page structure may "
-            "have changed. You can also paste a direct file URL below instead."
-        )
+# Check for locally bundled data first (populated by the GitHub Action)
+local_draws = get_local_draws(slug)
 
 CHECK_ALL_SENTINEL = -1
 chosen_url = None
 chosen_draw_label = None
 check_all_draws = False
 
-if draw_links:
-    pretty_labels = [prettify_draw_label(label, url) for label, url in draw_links]
+if local_draws:
+    pretty_labels = [label for label, _ in local_draws]
     options = [CHECK_ALL_SENTINEL] + list(range(len(pretty_labels)))
 
     def _format_option(i):
@@ -277,9 +318,41 @@ if draw_links:
     if choice_idx == CHECK_ALL_SENTINEL:
         check_all_draws = True
     else:
-        chosen_url = draw_links[choice_idx][1]
-        chosen_draw_label = draw_links[choice_idx][0]
-        st.caption(f"Source file: {chosen_url}")
+        chosen_draw_label = local_draws[choice_idx][1]
+
+else:
+    with st.spinner("Fetching available draw dates from savings.gov.pk..."):
+        try:
+            draw_links = get_draw_links(listing_url)
+        except Exception as e:
+            draw_links = []
+            st.error(
+                f"Couldn't reach the official listing page ({e}). "
+                "The site may be temporarily down, or its page structure may "
+                "have changed. You can also paste a direct file URL below instead."
+            )
+
+    if draw_links:
+        pretty_labels = [prettify_draw_label(label, url) for label, url in draw_links]
+        options = [CHECK_ALL_SENTINEL] + list(range(len(pretty_labels)))
+
+        def _format_option(i):
+            if i == CHECK_ALL_SENTINEL:
+                return f"✅ Check ALL available draws ({len(pretty_labels)} draws)"
+            return pretty_labels[i]
+
+        choice_idx = st.selectbox(
+            "2️⃣ Select the draw",
+            options=options,
+            format_func=_format_option,
+        )
+
+        if choice_idx == CHECK_ALL_SENTINEL:
+            check_all_draws = True
+        else:
+            chosen_url = draw_links[choice_idx][1]
+            chosen_draw_label = draw_links[choice_idx][0]
+            st.caption(f"Source file: {chosen_url}")
 
 st.markdown("**...or paste a direct result file URL instead:**")
 manual_url = st.text_input("Direct .txt or .pdf URL (optional — overrides the dropdown above)")
@@ -329,25 +402,38 @@ if check_clicked:
             except Exception as e:
                 st.error(f"Couldn't parse uploaded file: {e}")
 
-        elif check_all_draws:
-            draws_to_check = [
-                (label, prettify_draw_label(label, url), url) for label, url in draw_links
-            ]
-        elif chosen_url:
-            raw_label = chosen_draw_label or "Selected draw"
-            pretty_label = prettify_draw_label(chosen_draw_label, chosen_url) if chosen_draw_label else "Selected draw"
-            draws_to_check = [(raw_label, pretty_label, chosen_url)]
         else:
-            st.warning("Please select a draw, paste a file URL, or upload a file.")
+            use_local = False
+            if check_all_draws and local_draws:
+                draws_to_check = [(label, label, fp) for label, fp in local_draws]
+                use_local = True
+            elif check_all_draws:
+                draws_to_check = [
+                    (label, prettify_draw_label(label, url), url) for label, url in draw_links
+                ]
+            elif chosen_url:
+                raw_label = chosen_draw_label or "Selected draw"
+                pretty_label = prettify_draw_label(chosen_draw_label, chosen_url) if chosen_draw_label else "Selected draw"
+                draws_to_check = [(raw_label, pretty_label, chosen_url)]
+            elif local_draws:
+                raw_label = chosen_draw_label or "Unknown"
+                pretty_label = prettify_draw_label(raw_label, raw_label)
+                draws_to_check = [(raw_label, pretty_label, raw_label)]
+                use_local = True
+            else:
+                st.warning("Please select a draw, paste a file URL, or upload a file.")
 
         if draws_to_check and not uploaded_file:
-            progress = st.progress(0.0, text="Downloading official result files...")
-            for i, (raw_label, _, url) in enumerate(draws_to_check):
+            progress = st.progress(0.0, text="Reading result files...")
+            for i, (raw_label, _, url_or_fp) in enumerate(draws_to_check):
                 try:
-                    parsed_by_draw[raw_label] = fetch_and_parse_draw(url)
+                    if use_local:
+                        parsed_by_draw[raw_label] = parse_local_file(url_or_fp)
+                    else:
+                        parsed_by_draw[raw_label] = fetch_and_parse_draw(url_or_fp)
                 except Exception as e:
                     parsed_by_draw[raw_label] = None
-                    st.warning(f"Couldn't fetch/parse **{raw_label}**: {e}")
+                    st.warning(f"Couldn't parse **{raw_label}**: {e}")
                 progress.progress((i + 1) / len(draws_to_check))
             progress.empty()
 
@@ -399,12 +485,14 @@ with st.expander("ℹ️ About this tool / troubleshooting"):
 - This tool reads files that National Savings Pakistan publishes publicly
   at **savings.gov.pk/download-draws**. It does not use any private or
   unofficial data source.
+- Result files are automatically downloaded and bundled with the app
+  via a scheduled GitHub Action, so draws are always available even if
+  the government site is unreachable from your location.
 - Older draws are sometimes only available as `.doc` files instead of
   `.txt`/`.pdf` — those may not parse cleanly. Use the manual URL box to try
   a different file if a draw doesn't work.
-- If the dropdown fails to load, the government site may be rate-limiting
-  or temporarily blocking automated requests. Try again shortly, or fetch
-  the file yourself and paste its direct URL into the manual box.
+- If the automated data update fails, you can still paste a direct result
+  file URL or upload a file you downloaded manually.
 - This is an unofficial, independent tool. Always confirm a winning result
   on the official site before taking any action.
         """
