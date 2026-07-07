@@ -66,20 +66,9 @@ REQUEST_HEADERS = {
     )
 }
 
-# Proxy — set via Streamlit secrets (secrets.toml) or env var PROXY_URL.
-# Example secrets.toml:
-#   proxy_url = "http://your-proxy:port"
-_PROXY_URL = None
-try:
-    _PROXY_URL = st.secrets.get("proxy_url")
-except Exception:
-    pass
-if not _PROXY_URL:
-    import os
-    _PROXY_URL = os.environ.get("PROXY_URL")
-
 def _get_proxies():
-    return {"http": _PROXY_URL, "https": _PROXY_URL} if _PROXY_URL else None
+    proxy = st.session_state.get("proxy_url", "").strip()
+    return {"http": proxy, "https": proxy} if proxy else None
 
 # A real prize-tier header line always contains the word "prize" AND a
 # comma-formatted rupee amount (e.g. "1,500,000" or "9,300"). This lets us
@@ -293,6 +282,14 @@ if draw_links:
         chosen_url = draw_links[choice_idx][1]
         chosen_draw_label = draw_links[choice_idx][0]
         st.caption(f"Source file: {chosen_url}")
+
+with st.expander("⚙️ Proxy settings (only if the site is blocked in your region)"):
+    st.text_input(
+        "HTTP/HTTPS proxy URL",
+        key="proxy_url",
+        placeholder="e.g. http://123.45.67.89:8080",
+        label_visibility="collapsed",
+    )
 
 st.markdown("**...or paste a direct result file URL instead:**")
 manual_url = st.text_input("Direct .txt or .pdf URL (optional — overrides the dropdown above)")
