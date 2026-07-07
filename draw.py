@@ -33,6 +33,7 @@ may need small updates.
 
 import io
 import re
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -112,6 +113,18 @@ KNOWN_DENOMINATIONS = {"100", "200", "750", "1500", "7500", "15000", "25000", "4
 
 # Date embedded in a label like "15-04-2026" or "15/04/2026"
 DATE_PATTERN = re.compile(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})")
+
+# Local data directory — populated by the GitHub Action (scripts/update_data.py)
+DATA_DIR = Path(__file__).resolve().parent / "data"
+
+DENOM_SLUG = {
+    "Rs. 100": "rs-100",
+    "Rs. 200": "rs-200",
+    "Rs. 750": "rs-750",
+    "Rs. 1500": "rs-1500",
+    "Rs. 25,000 (Premium)": "rs-25000-premium",
+    "Rs. 40,000 (Premium)": "rs-40000-premium",
+}
 
 
 def prettify_draw_label(label: str, url: str) -> str:
@@ -239,6 +252,41 @@ def check_number(parsed_numbers, bond_number_str: str):
 
 
 # ---------------------------------------------------------------------------
+# Local data helpers (bundled result files from GitHub Action)
+# ---------------------------------------------------------------------------
+
+def get_local_draws(denom_slug: str):
+    """Return list of (pretty_label, filepath) for locally cached draw files."""
+    denom_dir = DATA_DIR / denom_slug
+    if not denom_dir.is_dir():
+        return []
+    files = sorted(denom_dir.iterdir(), reverse=True)
+    result = []
+    for fp in files:
+        if fp.suffix.lower() not in (".txt", ".pdf", ".doc", ".docx"):
+            continue
+        label = prettify_draw_label(fp.name, fp.name)
+        result.append((label, str(fp)))
+    return result
+
+
+def parse_local_file(filepath: str):
+    """Read and parse a local result file."""
+    if filepath.lower().endswith(".pdf"):
+        if pdfplumber is None:
+            raise RuntimeError("pdfplumber is not installed (pip install pdfplumber)")
+        text_parts = []
+        with pdfplumber.open(filepath) as pdf:
+            for page in pdf.pages:
+                text_parts.append(page.extract_text() or "")
+        text = "\n".join(text_parts)
+    else:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    return parse_draw_text(text)
+
+
+# ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
@@ -246,34 +294,26 @@ st.set_page_config(page_title="Pakistan Prize Bond Checker", page_icon="🎟️"
 
 st.title("🎟️ Pakistan Prize Bond Checker")
 st.caption(
-    "Live results fetched directly from the official National Savings "
-    "website (savings.gov.pk). Nothing is stored — every check happens "
-    "in real time. (Not affiliated with any third-party mirror site.)"
+    "Results sourced from the official National Savings website "
+    "(savings.gov.pk). Data files are bundled with the app and "
+    "automatically kept up to date."
 )
 
 # --- Step 1: Denomination ---
 denom_label = st.selectbox("1️⃣ Select your bond denomination", list(DENOMINATION_PAGES.keys()))
 listing_url = DENOMINATION_PAGES[denom_label]
+slug = DENOM_SLUG[denom_label]
 
 # --- Step 2: Draw date ---
-with st.spinner("Fetching available draw dates from savings.gov.pk..."):
-    try:
-        draw_links = get_draw_links(listing_url)
-    except Exception as e:
-        draw_links = []
-        st.error(
-            f"Couldn't reach the official listing page ({e}). "
-            "The site may be temporarily down, or its page structure may "
-            "have changed. You can also paste a direct file URL below instead."
-        )
+local_draws = get_local_draws(slug)
 
 CHECK_ALL_SENTINEL = -1
 chosen_url = None
 chosen_draw_label = None
 check_all_draws = False
 
-if draw_links:
-    pretty_labels = [prettify_draw_label(label, url) for label, url in draw_links]
+if local_draws:
+    pretty_labels = [label for label, _ in local_draws]
     options = [CHECK_ALL_SENTINEL] + list(range(len(pretty_labels)))
 
     def _format_option(i):
@@ -290,9 +330,41 @@ if draw_links:
     if choice_idx == CHECK_ALL_SENTINEL:
         check_all_draws = True
     else:
-        chosen_url = draw_links[choice_idx][1]
-        chosen_draw_label = draw_links[choice_idx][0]
-        st.caption(f"Source file: {chosen_url}")
+        chosen_draw_label = local_draws[choice_idx][1]
+
+else:
+    with st.spinner("Fetching available draw dates from savings.gov.pk..."):
+        try:
+            draw_links = get_draw_links(listing_url)
+        except Exception as e:
+            draw_links = []
+            st.error(
+                f"Couldn't reach the official listing page ({e}). "
+                "The site may be temporarily down, or its page structure may "
+                "have changed. You can also paste a direct file URL below instead."
+            )
+
+    if draw_links:
+        pretty_labels = [prettify_draw_label(label, url) for label, url in draw_links]
+        options = [CHECK_ALL_SENTINEL] + list(range(len(pretty_labels)))
+
+        def _format_option(i):
+            if i == CHECK_ALL_SENTINEL:
+                return f"✅ Check ALL available draws ({len(pretty_labels)} draws)"
+            return pretty_labels[i]
+
+        choice_idx = st.selectbox(
+            "2️⃣ Select the draw",
+            options=options,
+            format_func=_format_option,
+        )
+
+        if choice_idx == CHECK_ALL_SENTINEL:
+            check_all_draws = True
+        else:
+            chosen_url = draw_links[choice_idx][1]
+            chosen_draw_label = draw_links[choice_idx][0]
+            st.caption(f"Source file: {chosen_url}")
 
 st.markdown("**...or paste a direct result file URL instead:**")
 manual_url = st.text_input("Direct .txt or .pdf URL (optional — overrides the dropdown above)")
@@ -313,74 +385,91 @@ check_clicked = st.button("🔍 Check My Bond(s)", type="primary", use_container
 if check_clicked:
     bond_numbers = [n.strip() for n in re.split(r"[,\n]+", numbers_raw) if n.strip()]
 
-    if not chosen_url and not check_all_draws:
-        st.warning("Please select a draw (or paste a direct file URL) first.")
-    elif not bond_numbers:
+    if not bond_numbers:
         st.warning("Please enter at least one bond number.")
     else:
-        # Build the list of (raw_label, draw_display_label, file_url) to check against
-        if check_all_draws:
+        parsed_by_draw = {}
+        draws_to_check = []
+        use_local = False
+
+        if check_all_draws and local_draws:
+            draws_to_check = [(label, label, fp) for label, fp in local_draws]
+            use_local = True
+        elif check_all_draws:
             draws_to_check = [
                 (label, prettify_draw_label(label, url), url) for label, url in draw_links
             ]
-        else:
+        elif local_draws and chosen_draw_label:
+            pretty_label = prettify_draw_label(chosen_draw_label, chosen_draw_label)
+            draws_to_check = [(chosen_draw_label, pretty_label, chosen_draw_label)]
+            use_local = True
+        elif chosen_url:
             raw_label = chosen_draw_label or "Selected draw"
             pretty_label = prettify_draw_label(chosen_draw_label, chosen_url) if chosen_draw_label else "Selected draw"
             draws_to_check = [(raw_label, pretty_label, chosen_url)]
+        else:
+            st.warning("Please select a draw, paste a file URL, or upload a file.")
 
-        # Fetch + parse every relevant draw (cached, so repeats are instant)
-        parsed_by_draw = {}
-        progress = st.progress(0.0, text="Downloading official result files...")
-        for i, (raw_label, _, url) in enumerate(draws_to_check):
-            try:
-                parsed_by_draw[raw_label] = fetch_and_parse_draw(url)
-            except Exception as e:
-                parsed_by_draw[raw_label] = None
-                st.warning(f"Couldn't fetch/parse **{raw_label}**: {e}")
-            progress.progress((i + 1) / len(draws_to_check))
-        progress.empty()
+        if draws_to_check:
+            if use_local:
+                for raw_label, _, fp in draws_to_check:
+                    try:
+                        parsed_by_draw[raw_label] = parse_local_file(fp)
+                    except Exception as e:
+                        parsed_by_draw[raw_label] = None
+                        st.warning(f"Couldn't parse **{raw_label}**: {e}")
+            else:
+                progress = st.progress(0.0, text="Downloading official result files...")
+                for i, (raw_label, _, url) in enumerate(draws_to_check):
+                    try:
+                        parsed_by_draw[raw_label] = fetch_and_parse_draw(url)
+                    except Exception as e:
+                        parsed_by_draw[raw_label] = None
+                        st.warning(f"Couldn't fetch/parse **{raw_label}**: {e}")
+                    progress.progress((i + 1) / len(draws_to_check))
+                progress.empty()
 
-        st.divider()
+        if parsed_by_draw:
+            st.divider()
 
-        # Check every bond number against every fetched draw
-        for bond_number in bond_numbers:
-            st.subheader(f"Bond Number: {bond_number}")
+            for bond_number in bond_numbers:
+                st.subheader(f"Bond Number: {bond_number}")
 
-            try:
-                int(bond_number)
-            except ValueError:
-                st.error("Not a valid numeric bond number — skipped.")
-                continue
-
-            any_win = False
-            any_valid_draw = False
-            for raw_label, pretty_label, _ in draws_to_check:
-                parsed = parsed_by_draw.get(raw_label)
-                if parsed is None:
+                try:
+                    int(bond_number)
+                except ValueError:
+                    st.error("Not a valid numeric bond number — skipped.")
                     continue
-                any_valid_draw = True
-                matches = check_number(parsed, bond_number)
-                if matches:
-                    any_win = True
-                    display = pretty_label if "  -  " in pretty_label else raw_label
-                    st.success(f"🎉 WON in **{display}**")
-                    for label, raw in matches:
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;— **{label}**")
 
-            if not any_valid_draw:
-                st.warning("No draw data could be checked for this number.")
-            elif not any_win:
-                st.info(
-                    f"❌ Not found in {'any of the checked draws' if check_all_draws else 'this draw'}. "
-                    "Your principal is always safe regardless — you can "
-                    "encash the bond at face value anytime."
-                )
+                any_win = False
+                any_valid_draw = False
+                for raw_label, pretty_label, _ in draws_to_check:
+                    parsed = parsed_by_draw.get(raw_label)
+                    if parsed is None:
+                        continue
+                    any_valid_draw = True
+                    matches = check_number(parsed, bond_number)
+                    if matches:
+                        any_win = True
+                        display = pretty_label if "  -  " in pretty_label else raw_label
+                        st.success(f"🎉 WON in **{display}**")
+                        for label, raw in matches:
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;— **{label}**")
 
-        st.caption(
-            "Always double-check against the official result on savings.gov.pk "
-            "before making any prize claim, and make sure the denomination and "
-            "draw date match your physical bond exactly."
-        )
+                if not any_valid_draw:
+                    st.warning("No draw data could be checked for this number.")
+                elif not any_win:
+                    st.info(
+                        f"❌ Not found in this draw. "
+                        "Your principal is always safe regardless — you can "
+                        "encash the bond at face value anytime."
+                    )
+
+            st.caption(
+                "Always double-check against the official result on savings.gov.pk "
+                "before making any prize claim, and make sure the denomination and "
+                "draw date match your physical bond exactly."
+            )
 
 with st.expander("ℹ️ About this tool / troubleshooting"):
     st.markdown(
