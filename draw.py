@@ -66,6 +66,21 @@ REQUEST_HEADERS = {
     )
 }
 
+# Proxy — set via Streamlit secrets (secrets.toml) or env var PROXY_URL.
+# Example secrets.toml:
+#   proxy_url = "http://your-proxy:port"
+_PROXY_URL = None
+try:
+    _PROXY_URL = st.secrets.get("proxy_url")
+except Exception:
+    pass
+if not _PROXY_URL:
+    import os
+    _PROXY_URL = os.environ.get("PROXY_URL")
+
+def _get_proxies():
+    return {"http": _PROXY_URL, "https": _PROXY_URL} if _PROXY_URL else None
+
 # A real prize-tier header line always contains the word "prize" AND a
 # comma-formatted rupee amount (e.g. "1,500,000" or "9,300"). This lets us
 # tell an actual prize header apart from decorative title lines like
@@ -140,7 +155,7 @@ def get_draw_links(listing_page_url: str):
     a result file (.txt/.pdf/.doc), returning a list of (label, url) tuples,
     most recent first (the site already lists them newest-year-first).
     """
-    resp = requests.get(listing_page_url, headers=REQUEST_HEADERS, timeout=20)
+    resp = requests.get(listing_page_url, headers=REQUEST_HEADERS, proxies=_get_proxies(), timeout=20)
     resp.raise_for_status()
     html = resp.text
 
@@ -163,7 +178,7 @@ def fetch_and_parse_draw(file_url: str):
     Download a single draw's result file and parse it into a list of
     (prize_label, number_as_int, number_as_string) tuples.
     """
-    resp = requests.get(file_url, headers=REQUEST_HEADERS, timeout=30)
+    resp = requests.get(file_url, headers=REQUEST_HEADERS, proxies=_get_proxies(), timeout=30)
     resp.raise_for_status()
 
     if file_url.lower().endswith(".pdf"):
