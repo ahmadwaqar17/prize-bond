@@ -287,6 +287,8 @@ if manual_url.strip():
     chosen_url = manual_url.strip()
     check_all_draws = False
 
+uploaded_file = st.file_uploader("**...or upload a result file (.txt or .pdf):**", type=["txt", "pdf"])
+
 # --- Step 3: Bond number(s) ---
 st.markdown("**3️⃣ Enter your prize bond number(s)**")
 numbers_raw = st.text_area(
@@ -300,74 +302,96 @@ check_clicked = st.button("🔍 Check My Bond(s)", type="primary", use_container
 if check_clicked:
     bond_numbers = [n.strip() for n in re.split(r"[,\n]+", numbers_raw) if n.strip()]
 
-    if not chosen_url and not check_all_draws:
-        st.warning("Please select a draw (or paste a direct file URL) first.")
-    elif not bond_numbers:
+    if not bond_numbers:
         st.warning("Please enter at least one bond number.")
     else:
-        # Build the list of (raw_label, draw_display_label, file_url) to check against
-        if check_all_draws:
+        parsed_by_draw = {}
+        draws_to_check = []
+
+        if uploaded_file:
+            # Parse the uploaded file directly
+            try:
+                raw = uploaded_file.read()
+                if uploaded_file.name.lower().endswith(".pdf"):
+                    if pdfplumber is None:
+                        raise RuntimeError("pdfplumber is not installed")
+                    text_parts = []
+                    with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                        for page in pdf.pages:
+                            text_parts.append(page.extract_text() or "")
+                    text = "\n".join(text_parts)
+                else:
+                    text = raw.decode("utf-8", errors="ignore")
+                parsed = parse_draw_text(text)
+                label = uploaded_file.name
+                parsed_by_draw[label] = parsed
+                draws_to_check = [(label, label, None)]
+            except Exception as e:
+                st.error(f"Couldn't parse uploaded file: {e}")
+
+        elif check_all_draws:
             draws_to_check = [
                 (label, prettify_draw_label(label, url), url) for label, url in draw_links
             ]
-        else:
+        elif chosen_url:
             raw_label = chosen_draw_label or "Selected draw"
             pretty_label = prettify_draw_label(chosen_draw_label, chosen_url) if chosen_draw_label else "Selected draw"
             draws_to_check = [(raw_label, pretty_label, chosen_url)]
+        else:
+            st.warning("Please select a draw, paste a file URL, or upload a file.")
 
-        # Fetch + parse every relevant draw (cached, so repeats are instant)
-        parsed_by_draw = {}
-        progress = st.progress(0.0, text="Downloading official result files...")
-        for i, (raw_label, _, url) in enumerate(draws_to_check):
-            try:
-                parsed_by_draw[raw_label] = fetch_and_parse_draw(url)
-            except Exception as e:
-                parsed_by_draw[raw_label] = None
-                st.warning(f"Couldn't fetch/parse **{raw_label}**: {e}")
-            progress.progress((i + 1) / len(draws_to_check))
-        progress.empty()
+        if draws_to_check and not uploaded_file:
+            progress = st.progress(0.0, text="Downloading official result files...")
+            for i, (raw_label, _, url) in enumerate(draws_to_check):
+                try:
+                    parsed_by_draw[raw_label] = fetch_and_parse_draw(url)
+                except Exception as e:
+                    parsed_by_draw[raw_label] = None
+                    st.warning(f"Couldn't fetch/parse **{raw_label}**: {e}")
+                progress.progress((i + 1) / len(draws_to_check))
+            progress.empty()
 
-        st.divider()
+        if parsed_by_draw:
+            st.divider()
 
-        # Check every bond number against every fetched draw
-        for bond_number in bond_numbers:
-            st.subheader(f"Bond Number: {bond_number}")
+            for bond_number in bond_numbers:
+                st.subheader(f"Bond Number: {bond_number}")
 
-            try:
-                int(bond_number)
-            except ValueError:
-                st.error("Not a valid numeric bond number — skipped.")
-                continue
-
-            any_win = False
-            any_valid_draw = False
-            for raw_label, pretty_label, _ in draws_to_check:
-                parsed = parsed_by_draw.get(raw_label)
-                if parsed is None:
+                try:
+                    int(bond_number)
+                except ValueError:
+                    st.error("Not a valid numeric bond number — skipped.")
                     continue
-                any_valid_draw = True
-                matches = check_number(parsed, bond_number)
-                if matches:
-                    any_win = True
-                    display = pretty_label if "  -  " in pretty_label else raw_label
-                    st.success(f"🎉 WON in **{display}**")
-                    for label, raw in matches:
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;— **{label}**")
 
-            if not any_valid_draw:
-                st.warning("No draw data could be checked for this number.")
-            elif not any_win:
-                st.info(
-                    f"❌ Not found in {'any of the checked draws' if check_all_draws else 'this draw'}. "
-                    "Your principal is always safe regardless — you can "
-                    "encash the bond at face value anytime."
-                )
+                any_win = False
+                any_valid_draw = False
+                for raw_label, pretty_label, _ in draws_to_check:
+                    parsed = parsed_by_draw.get(raw_label)
+                    if parsed is None:
+                        continue
+                    any_valid_draw = True
+                    matches = check_number(parsed, bond_number)
+                    if matches:
+                        any_win = True
+                        display = pretty_label if "  -  " in pretty_label else raw_label
+                        st.success(f"🎉 WON in **{display}**")
+                        for label, raw in matches:
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;— **{label}**")
 
-        st.caption(
-            "Always double-check against the official result on savings.gov.pk "
-            "before making any prize claim, and make sure the denomination and "
-            "draw date match your physical bond exactly."
-        )
+                if not any_valid_draw:
+                    st.warning("No draw data could be checked for this number.")
+                elif not any_win:
+                    st.info(
+                        f"❌ Not found in this draw. "
+                        "Your principal is always safe regardless — you can "
+                        "encash the bond at face value anytime."
+                    )
+
+            st.caption(
+                "Always double-check against the official result on savings.gov.pk "
+                "before making any prize claim, and make sure the denomination and "
+                "draw date match your physical bond exactly."
+            )
 
 with st.expander("ℹ️ About this tool / troubleshooting"):
     st.markdown(
